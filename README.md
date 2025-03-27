@@ -3,7 +3,7 @@
 Projet réalisé dans le cadre de l'option en Data science de 5ième année au CESI.  
 Auteurs :  
 
-- Nicola JOURNEL
+- Nicolas JOURNEL
 - Ahmed AMARA
 - Franck AGAPE
 - Esteban LAVAUX
