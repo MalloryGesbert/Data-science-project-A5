@@ -5,7 +5,7 @@ Auteurs :
 
 - Nicolas JOURNEL
 - Ahmed AMARA
-- Franck AGAPE
+- Franck MBAPTE
 - Esteban LAVAUX
 - Mallory GESBERT
 
