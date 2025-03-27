@@ -36,3 +36,7 @@ Penser à update les dépendances avec :
 ```bash
 pip freeze > requirements.txt
 ```
+
+Penser à "Clear All Outputs" avant tout push du fichier jupyter
+![image](https://github.com/user-attachments/assets/ed64e12b-c28a-4443-afff-063e4418baff)
+
