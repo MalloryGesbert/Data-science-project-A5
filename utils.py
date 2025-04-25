@@ -1,30 +1,126 @@
 # utils.py
-import os
 
+import os
 import matplotlib.pyplot as plt
 import numpy as np
 import PIL
 import tensorflow as tf
-import shutil
 import random
-import kaggle
-import requests
-from zipfile import ZipFile
 from tqdm.notebook import tqdm  # barre de progression
-
-# from tensorflow.keras.models import Sequential
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Conv2D, MaxPooling2D, Input, UpSampling2D
-from tensorflow.keras.optimizers import Adam
+import pickle
 from tensorflow import keras
-# from tensorflow.keras import layers
-# from tensorflow.keras.preprocessing.image import ImageDataGenerator
-# from tensorflow.keras.utils import img_to_array, load_img
 from tensorflow.keras.preprocessing.image import load_img, img_to_array
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import cv2
 from PIL import Image
+
+top_k = 5000 # Chosir les 5000 mots les plus frequents du vocabulaire
+embedding_dim = 256 # Dimension de l'espace d'embedding
+units = 512 # Taille de la couche caché dans le RNN
+vocab_size = top_k + 1 # Taille du vocabulaire (5000 mots + 1 pour le token <pad>)
+
+class CNN_Encoder(tf.keras.Model):
+    # Comme les images sont déjà prétraités par InceptionV3 est représenté sous forme compacte
+    # L'encodeur CNN ne fera que transmettre ces caractéristiques à une couche dense
+    def __init__(self, embedding_dim):
+        super(CNN_Encoder, self).__init__()
+        self.fc = tf.keras.layers.Dense(embedding_dim)
+        self.embedding_dim = embedding_dim
+
+    def call(self, x):
+        x = self.fc(x)
+        x = tf.nn.relu(x)
+        return x
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "embedding_dim": self.embedding_dim
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+    
+class BahdanauAttention(tf.keras.Model):
+    def __init__(self, units):
+        super(BahdanauAttention, self).__init__()
+        self.units = units
+        self.W1 = tf.keras.layers.Dense(units)
+        self.W2 = tf.keras.layers.Dense(units)
+        self.V = tf.keras.layers.Dense(1)
+
+    def call(self, features, hidden):
+        hidden_with_time_axis = tf.expand_dims(hidden, 1)
+        score = self.V(tf.nn.tanh(self.W1(features) + self.W2(hidden_with_time_axis)))
+        attention_weights = tf.nn.softmax(score, axis=1)
+        context_vector = tf.reduce_sum(attention_weights * features, axis=1)
+        return context_vector, attention_weights
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "units": self.units
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
+
+class RNN_Decoder(tf.keras.Model):
+    def __init__(self, embedding_dim, units, vocab_size):
+        super(RNN_Decoder, self).__init__()
+        self.units = units
+        self.vocab_size = vocab_size
+        self.embedding_dim = embedding_dim  # ✅ Fix ajouté
+
+        self.embedding = tf.keras.layers.Embedding(vocab_size, embedding_dim)
+        self.gru = tf.keras.layers.GRU(self.units,
+                                       return_sequences=True,
+                                       return_state=True,
+                                       recurrent_initializer='glorot_uniform')
+        self.fc1 = tf.keras.layers.Dense(self.units)
+        self.fc2 = tf.keras.layers.Dense(vocab_size)
+
+        self.attention = BahdanauAttention(self.units)
+
+
+    def call(self, x, features, hidden):
+        # (batch_size, 256), (batch_size, 64, 256)
+        context_vector, attention_weights = self.attention(features, hidden)
+
+        # (batch_size, 1, embedding_dim)
+        x = self.embedding(x)
+
+        # Concaténer context_vector à chaque embedding (batch_size, 1, embedding_dim + context_dim)
+        x = tf.concat([tf.expand_dims(context_vector, 1), x], axis=-1)
+
+        # Passer dans la GRU
+        output, state = self.gru(x)
+
+        x = self.fc1(output)  # (batch_size, 1, units)
+        x = tf.reshape(x, (-1, x.shape[2]))  # (batch_size, units)
+        x = self.fc2(x)  # (batch_size, vocab_size)
+
+        return x, state, attention_weights
+
+    def reset_state(self, batch_size):
+        return tf.zeros((batch_size, self.units))
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "embedding_dim": self.embedding_dim,
+            "units": self.units,
+            "vocab_size": self.vocab_size
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)   
 
 #---------------------------------------------------------------
 def get_infos_datas(dataset_path):
@@ -249,7 +345,7 @@ def display_images_with_predictions(model, dataset_path, num_images=5):
     plt.show()
 
 #---------------------------------------------------------------
-def load_autoencoder(weight_path, learning_rate=0.001):
+def load_autoencoder(model_path, learning_rate=0.001):
     """
     Fonction pour charger l'autoencodeur depuis un fichier HDF5.
 
@@ -259,35 +355,13 @@ def load_autoencoder(weight_path, learning_rate=0.001):
     :return: Modèle de l'autoencodeur
 
     """
-    # Encoder
-        # Entrée de l'image
-    input_img = Input(shape=(256, 256, 3))  # à adapter selon ta taille d’image
-        # Bloc 1
-    x = Conv2D(32, (3, 3), activation='relu', padding='same')(input_img)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-        # Bloc 2
-    x = Conv2D(16, (3, 3), activation='relu', padding='same')(x)
-    x = MaxPooling2D((2, 2), padding='same')(x)
-    # Decoder
-        # Bloc 1
-    x = Conv2D(16, (3, 3), activation='relu', padding='same')(x)
-    x = UpSampling2D((2, 2))(x)
-        # Bloc 2
-    x = Conv2D(32, (3, 3), activation='relu', padding='same')(x)
-    x = UpSampling2D((2, 2))(x)
-        # Dernière couche (sortie)
-    decoded = Conv2D(3, (3, 3), activation='sigmoid', padding='same')(x)
+    # # Chargement des poids
+    if not os.path.exists(model_path):
+        print("⚠️ Le fichier de poids n'existe pas.")
 
-    # Création du modèle générique
-    autoencoder = Model(input_img, decoded)
-
-    # Compilation du modèle générique
-    autoencoder.compile(optimizer=Adam(learning_rate=learning_rate), loss='mse', metrics=['accuracy'])
-
-    # Chargement des poids
-    autoencoder.load_weights(weight_path)
-
-    print(f"Autoencodeur chargé depuis {weight_path}")
+    # autoencoder.load_weights(weight_path)
+    autoencoder = keras.models.load_model(model_path, custom_objects={'mse': keras.losses.MeanSquaredError()})
+    print(f"Autoencodeur chargé depuis {model_path}")
     return autoencoder
 
 #---------------------------------------------------------------
@@ -337,17 +411,22 @@ def denoise_images(autoencoder, images):
     Returns:
         np.ndarray: Tableau des images débruitées, de même forme que les images d'entrée.
     """
-    denoised_images = autoencoder.predict(images, verbose=0)
-    print("Prédiction réussie.")
+    try :
+        denoised_images = autoencoder.predict(images, verbose=0)
+        print("Prédiction réussie.")
+    except Exception as e:
+        print(f"Erreur lors de la conversion des images : {e}")
+        print("Prédiction échouée.")
+        return None
+    
     return denoised_images
-
 
 #---------------------------------------------------------------
 def plot_denoised_examples(noisy_images, denoised_images, n=5):
     """
     Affiche des exemples d'images bruitées et débruitées côte à côte.
     """
-    plt.figure(figsize=(15, 4))
+    plt.figure(figsize=(12, 6), dpi=100)
     for i in range(n):
         cmap_mode = 'gray' if noisy_images[i].shape[-1] == 1 else None
 
@@ -361,10 +440,87 @@ def plot_denoised_examples(noisy_images, denoised_images, n=5):
         # Image débruitée
         plt.subplot(2, n, i + 1 + n)
         denoised_img = denoised_images[i].squeeze()
-        # denoised_img = (denoised_img - denoised_img.min()) / (denoised_img.max() - denoised_img.min() + 1e-8)
+        denoised_img = (denoised_img - denoised_img.min()) / (denoised_img.max() - denoised_img.min() + 1e-8)
         plt.imshow(denoised_img, cmap=cmap_mode)
         plt.title("Débruitée")
         plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+#---------------------------------------------------------------
+def load_model_caption(token_dir, save_dir):
+    """
+    Fonction pour charger le modèle de légende depuis un fichier HDF5.
+
+    :param model_path: Chemin vers la sauvegarde du modèle
+    """
+    with open(os.path.join(token_dir, 'tokenizer.pickle'), 'rb') as handle:
+        tokenizer = pickle.load(handle)
+
+    # === Initialisation du modèle et chargement des poids ===
+    Load_encoder = CNN_Encoder(embedding_dim)
+    Load_decoder = RNN_Decoder(embedding_dim, units, vocab_size)
+    Load_optimizer = tf.keras.optimizers.Adam()
+
+    ckpt = tf.train.Checkpoint(encoder=Load_encoder, decoder=Load_decoder)
+    ckpt_manager = tf.train.CheckpointManager(ckpt, save_dir, max_to_keep=5)
+
+    if ckpt_manager.latest_checkpoint:
+        status = ckpt.restore(ckpt_manager.latest_checkpoint).expect_partial()
+        print(f"Checkpoint restauré depuis {ckpt_manager.latest_checkpoint}")
+    else:
+        print("Aucun checkpoint trouvé.")
+
+    image_model = tf.keras.applications.InceptionV3(include_top=False, weights='imagenet')
+    new_input = image_model.input
+    hidden_layer = image_model.layers[-1].output
+    image_features_extract_model = tf.keras.Model(new_input, hidden_layer)
+
+    return Load_encoder, Load_decoder, image_features_extract_model, tokenizer
+
+def generate_caption_from_array(image_array, Load_encoder, Load_decoder, image_features_extract_model, tokenizer, max_length):
+    hidden = Load_decoder.reset_state(batch_size=1)
+    
+    img = tf.image.resize(image_array, (299, 299))  # Requis pour InceptionV3
+    img = tf.keras.applications.inception_v3.preprocess_input(img)
+    temp_input = tf.expand_dims(img, 0)
+
+    img_tensor_val = image_features_extract_model(temp_input)
+    img_tensor_val = tf.reshape(img_tensor_val, (img_tensor_val.shape[0], -1, img_tensor_val.shape[3]))
+    features = Load_encoder(img_tensor_val)
+
+    dec_input = tf.expand_dims([tokenizer.word_index['<start>']], 0)
+    result = []
+
+    for _ in range(max_length):
+        predictions, hidden, _ = Load_decoder(dec_input, features, hidden)
+        predicted_id = tf.random.categorical(predictions, 1)[0][0].numpy()
+        word = tokenizer.index_word.get(predicted_id, '')
+        if word == '<end>':
+            break
+        result.append(word)
+        dec_input = tf.expand_dims([predicted_id], 0)
+
+    return ' '.join(result)
+    
+#---------------------------------------------------------------
+def plot_captionned_images(images_denoised, captions, n=5):
+    """
+    Affiche un nombre limité d'images avec leurs légendes.
+
+    Args:
+        image_paths (list): Liste des chemins d'images.
+        captions (list): Liste des légendes correspondantes.
+        n (int): Nombre d'images à afficher.
+    """
+    # Affichage des images et de leur descriptions
+    plt.figure(figsize=(20, 20))
+    for idx, image_array  in enumerate(images_denoised):
+    
+        plt.subplot(5, 2, idx + 1)
+        plt.imshow(image_array)
+        plt.axis('off')
+        plt.title(captions[idx], fontsize=10)
 
     plt.tight_layout()
     plt.show()
